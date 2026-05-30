@@ -100,6 +100,9 @@ void do_search(int fd, const char *query) {
             uint32_t payload_len = 0;
 
             if (slsk_process_server_msg(fd, &msg_code, &payload, &payload_len) == 0) {
+                if (getenv("SLSK_DEBUG")) {
+                    fprintf(stderr, "[DEBUG] Server msg: code=%u, len=%u\n", msg_code, payload_len);
+                }
                 if (msg_code == SLSK_MSG_SEARCH_REPLY && payload != NULL && payload_len >= 4) {
                     uint32_t decompressed_len = get_u32_le(payload);
                     if (decompressed_len > 0 && decompressed_len < 10000000) { // Reasonable limit 10MB
@@ -143,6 +146,9 @@ void do_get(int fd_server, const char *username, const char *filepath, uint64_t 
             uint32_t payload_len = 0;
 
             if (slsk_process_server_msg(fd_server, &msg_code, &payload, &payload_len) == 0) {
+                if (getenv("SLSK_DEBUG")) {
+                    fprintf(stderr, "[DEBUG] Server msg: code=%u, len=%u\n", msg_code, payload_len);
+                }
                 if (msg_code == SLSK_MSG_GET_PEER_ADDR && payload != NULL && payload_len >= 4) {
                     uint32_t offset = 0;
                     uint32_t user_len = get_u32_le(payload);
@@ -301,17 +307,23 @@ int main(int argc, char **argv) {
     }
 
     // Wait briefly for login reply (msg 1)
-    if (net_wait(fd, 2000) > 0) {
+    if (net_wait(fd, 5000) > 0) {
         uint32_t msg_code;
         uint8_t *payload = NULL;
         uint32_t payload_len = 0;
         if (slsk_process_server_msg(fd, &msg_code, &payload, &payload_len) == 0) {
+            if (getenv("SLSK_DEBUG")) {
+                fprintf(stderr, "[DEBUG] Server msg: code=%u, len=%u\n", msg_code, payload_len);
+            }
             if (msg_code == SLSK_MSG_LOGIN && payload != NULL && payload_len >= 1) {
                 if (payload[0] != 1) {
                     fprintf(stderr, "Login failed. Check credentials.\n");
                     free(payload);
                     net_close(fd);
                     return 1;
+                }
+                if (getenv("SLSK_DEBUG")) {
+                    fprintf(stderr, "[DEBUG] Login successful!\n");
                 }
             }
             if (payload) free(payload);

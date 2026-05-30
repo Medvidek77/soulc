@@ -16,4 +16,10 @@ int net_write_exact(int fd, const void *buf, size_t len);
  * Returns 1 if data available, 0 if timeout, -1 on error. */
 int net_wait(int fd, int timeout_ms);
 
+/* Create a listening TCP socket on a specific port. Returns fd or -1 on error. */
+int net_listen(const char *port);
+
+/* Accept incoming connection on listening socket. Returns new fd or -1 on error. */
+int net_accept(int listen_fd);
+
 #endif

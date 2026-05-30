@@ -89,3 +89,46 @@ int net_wait(int fd, int timeout_ms) {
     if (errno == EINTR) return 0;
     return -1;
 }
+
+int net_listen(const char *port) {
+    struct addrinfo hints, *res, *p;
+    int fd = -1;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    if (getaddrinfo(NULL, port, &hints, &res) != 0) return -1;
+
+    for (p = res; p != NULL; p = p->ai_next) {
+        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd < 0) continue;
+
+        int yes = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+
+        if (bind(fd, p->ai_addr, p->ai_addrlen) == 0) {
+            break; // Success
+        }
+
+        close(fd);
+        fd = -1;
+    }
+
+    freeaddrinfo(res);
+
+    if (fd >= 0) {
+        if (listen(fd, 10) != 0) {
+            close(fd);
+            return -1;
+        }
+    }
+
+    return fd;
+}
+
+int net_accept(int listen_fd) {
+    int fd = accept(listen_fd, NULL, NULL);
+    return fd;
+}

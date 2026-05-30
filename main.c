@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 
 void print_usage(void) {
     printf("soulc - minimalist soulseek client\n");
@@ -82,7 +83,7 @@ void parse_search_reply(const uint8_t *payload, uint32_t len) {
     free(user);
 }
 
-void do_search(int fd, const char *query) {
+void do_search(int fd, int listen_fd, const char *query) {
     uint32_t ticket = (uint32_t)time(NULL);
     if (slsk_send_search(fd, query, ticket) < 0) {
         fprintf(stderr, "Failed to send search\n");
@@ -92,9 +93,27 @@ void do_search(int fd, const char *query) {
     printf("Searching for '%s'. Wait ~10 seconds for results...\n", query);
     printf("USER\tSIZE_BYTES\tFILEPATH\n");
 
+    struct pollfd pfds[64];
+    int pfd_count = 0;
+
+    pfds[0].fd = fd; // server
+    pfds[0].events = POLLIN;
+    pfd_count++;
+
+    if (listen_fd >= 0) {
+        pfds[1].fd = listen_fd;
+        pfds[1].events = POLLIN;
+        pfd_count++;
+    }
+
     time_t start = time(NULL);
     while (time(NULL) - start < 10) {
-        if (net_wait(fd, 1000) > 0) {
+        int ret = poll(pfds, pfd_count, 1000);
+        if (ret < 0) break;
+        if (ret == 0) continue;
+
+        // Check server connection
+        if (pfds[0].revents & POLLIN) {
             uint32_t msg_code;
             uint8_t *payload = NULL;
             uint32_t payload_len = 0;
@@ -294,6 +313,14 @@ int main(int argc, char **argv) {
     const char *port = getenv("SLSK_PORT");
     if (!port) port = "2242";
 
+    const char *listen_port_str = getenv("SLSK_LISTEN_PORT");
+    int listen_fd = -1;
+    int listen_port = 0;
+    if (listen_port_str) {
+        listen_fd = net_listen(listen_port_str);
+        if (listen_fd >= 0) listen_port = atoi(listen_port_str);
+    }
+
     int fd = net_connect(server, port);
     if (fd < 0) {
         fprintf(stderr, "Failed to connect to server %s:%s\n", server, port);
@@ -326,14 +353,19 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "[DEBUG] Login successful!\n");
                 }
                 // Send listen port 0 (passive client)
-                slsk_send_listen_port(fd, 0);
+                // Oh wait, we will use our new listen port if active
+                if (listen_port > 0) {
+                    slsk_send_listen_port(fd, listen_port);
+                } else {
+                    slsk_send_listen_port(fd, 0);
+                }
             }
             if (payload) free(payload);
         }
     }
 
     if (strcmp(argv[1], "search") == 0 && argc == 3) {
-        do_search(fd, argv[2]);
+        do_search(fd, listen_fd, argv[2]);
     } else if (strcmp(argv[1], "get") == 0 && argc == 5) {
         char *endptr;
         uint64_t file_size = strtoull(argv[4], &endptr, 10);

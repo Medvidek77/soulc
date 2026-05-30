@@ -28,6 +28,9 @@ size_t slsk_pack_string(uint8_t *buf, size_t buf_size, const char *str);
 /* Send a login message to the server */
 int slsk_send_login(int fd, const char *username, const char *password);
 
+/* Send listen port to server */
+int slsk_send_listen_port(int fd, uint32_t port);
+
 /* Send a search query to the server */
 int slsk_send_search(int fd, const char *query, uint32_t ticket);
 

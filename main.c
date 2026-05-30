@@ -325,6 +325,8 @@ int main(int argc, char **argv) {
                 if (getenv("SLSK_DEBUG")) {
                     fprintf(stderr, "[DEBUG] Login successful!\n");
                 }
+                // Send listen port 0 (passive client)
+                slsk_send_listen_port(fd, 0);
             }
             if (payload) free(payload);
         }

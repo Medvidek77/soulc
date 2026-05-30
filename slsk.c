@@ -58,6 +58,14 @@ int slsk_send_login(int fd, const char *username, const char *password) {
     return net_write_exact(fd, buf, offset);
 }
 
+int slsk_send_listen_port(int fd, uint32_t port) {
+    uint8_t buf[12];
+    put_u32_le(buf, 8); // len
+    put_u32_le(buf + 4, 2); // msg code 2 (SetListenPort)
+    put_u32_le(buf + 8, port);
+    return net_write_exact(fd, buf, 12);
+}
+
 int slsk_send_search(int fd, const char *query, uint32_t ticket) {
     uint8_t buf[1024];
     size_t offset = 8; // skip length and code

@@ -14,7 +14,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 
-void print_usage() {
+void print_usage(void) {
     printf("soulc - minimalist soulseek client\n");
     printf("Usage:\n");
     printf("  soulc search <query>\n");

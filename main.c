@@ -104,6 +104,9 @@ static void parse_search_reply(const uint8_t *payload, uint32_t len) {
     result_count = get_u32_le(payload + offset);
     offset += 4;
 
+    if (getenv("SLSK_DEBUG")) {
+        fprintf(stderr, "[DEBUG] Parsed search reply from user '%s', result count: %u\n", user, result_count);
+    }
     parse_result_list(payload, len, user, &offset, result_count);
 
     if (len - offset >= 13) {
@@ -111,6 +114,9 @@ static void parse_search_reply(const uint8_t *payload, uint32_t len) {
         if (len - offset >= 4) {
             private_count = get_u32_le(payload + offset);
             offset += 4;
+            if (getenv("SLSK_DEBUG")) {
+                fprintf(stderr, "[DEBUG] Parsed private search reply from user '%s', result count: %u\n", user, private_count);
+            }
             parse_result_list(payload, len, user, &offset, private_count);
         }
     }
@@ -136,7 +142,13 @@ static int handle_connect_to_peer(const uint8_t *payload, uint32_t len) {
     snprintf(sport, sizeof(sport), "%u", port);
 
     peer_fd = net_connect(host, sport);
+    if (getenv("SLSK_DEBUG")) {
+        fprintf(stderr, "[DEBUG] Connecting to peer %s:%s (fd: %d)...\n", host, sport, peer_fd);
+    }
     if (peer_fd >= 0 && slsk_send_pierce_fw(peer_fd, token) < 0) {
+        if (getenv("SLSK_DEBUG")) {
+            fprintf(stderr, "[DEBUG] Failed to send pierce firewall message to %s:%s\n", host, sport);
+        }
         net_close(peer_fd);
         peer_fd = -1;
     }
@@ -165,6 +177,9 @@ static void handle_peer_msg(int peer_fd) {
     if (msg_len < 4) { free(msg); return; }
 
     code = get_u32_le(msg);
+    if (getenv("SLSK_DEBUG")) {
+        fprintf(stderr, "[DEBUG] Peer msg: code=%u, len=%u\n", code, msg_len - 4);
+    }
     if (code == PEER_MSG_FILE_SEARCH_RESPONSE) {
         if (inflate_msg(msg + 4, msg_len - 4, &plain, &plain_len) == 0) {
             parse_search_reply(plain, plain_len);
@@ -198,6 +213,9 @@ static void do_search(int fd, int listen_fd, const char *query) {
         fprintf(stderr, "Failed to send search\n");
         return;
     }
+    if (getenv("SLSK_DEBUG")) {
+        fprintf(stderr, "[DEBUG] Sent search query for '%s' (ticket: %u). Waiting up to %d seconds for responses...\n", query, ticket, timeout);
+    }
 
     pfds[0].fd = fd;
     pfds[0].events = POLLIN;
@@ -226,7 +244,15 @@ static void do_search(int fd, int listen_fd, const char *query) {
                 fprintf(stderr, "Connection to server lost during search.\n");
                 break;
             }
+
+            if (getenv("SLSK_DEBUG") && msg_code != 0) {
+                fprintf(stderr, "[DEBUG] search poll server msg: code=%u, len=%u\n", msg_code, payload_len);
+            }
+
             if (msg_code == SLSK_MSG_CONNECT_TO_PEER && payload) {
+                if (getenv("SLSK_DEBUG")) {
+                    fprintf(stderr, "[DEBUG] Got SLSK_MSG_CONNECT_TO_PEER, attempting connection...\n");
+                }
                 int peer_fd = handle_connect_to_peer(payload, payload_len);
                 if (peer_fd >= 0) {
                     if (pfd_count < 64) {
@@ -234,8 +260,14 @@ static void do_search(int fd, int listen_fd, const char *query) {
                         pfds[pfd_count].events = POLLIN;
                         pfds[pfd_count].revents = 0;
                         pfd_count++;
+                        if (getenv("SLSK_DEBUG")) {
+                            fprintf(stderr, "[DEBUG] Accepted ConnectToPeer request, total active poll fds: %d\n", pfd_count);
+                        }
                     } else {
                         net_close(peer_fd);
+                        if (getenv("SLSK_DEBUG")) {
+                            fprintf(stderr, "[DEBUG] Max connections reached. Closing new peer connection.\n");
+                        }
                     }
                 }
             }

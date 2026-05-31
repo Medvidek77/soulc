@@ -56,3 +56,13 @@ soulc get "username" "filepath" "size_in_bytes"
 ```
 It connects to the server to find the peer's IP and port, then connects directly to the peer to download the file to the current directory.
 The exact file size must be provided (as printed by the search command).
+
+## Scripting and Interactive Selection
+
+Since `soulc search` outputs standard Tab-Separated Values (TSV) directly to stdout, it is ideal for composing with other UNIX tools.
+To get an interactive download selection menu (without copy-pasting values manually), you can use the included `soul-fzf.sh` wrapper script:
+
+```sh
+./soul-fzf.sh "search query"
+```
+*(Note: Requires `fzf` for the best experience. Falls back to standard bash `select` if `fzf` is not installed.)*

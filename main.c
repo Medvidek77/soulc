@@ -142,9 +142,6 @@ static int handle_connect_to_peer(const uint8_t *payload, uint32_t len) {
     snprintf(sport, sizeof(sport), "%u", port);
 
     peer_fd = net_connect(host, sport);
-    if (getenv("SLSK_DEBUG")) {
-        fprintf(stderr, "[DEBUG] Connecting to peer %s:%s (fd: %d)...\n", host, sport, peer_fd);
-    }
     if (peer_fd >= 0 && slsk_send_pierce_fw(peer_fd, token) < 0) {
         if (getenv("SLSK_DEBUG")) {
             fprintf(stderr, "[DEBUG] Failed to send pierce firewall message to %s:%s\n", host, sport);

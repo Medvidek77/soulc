@@ -36,11 +36,14 @@ int net_connect(const char *host, const char *port) {
             struct pollfd pfd;
             pfd.fd = fd;
             pfd.events = POLLOUT;
-            if (poll(&pfd, 1, 1000) > 0) {
+            if (poll(&pfd, 1, 1500) > 0) {
                 int error = 0;
                 socklen_t errlen = sizeof(error);
                 if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &errlen) == 0 && error == 0) rc = 0;
             }
+        }
+        if (rc < 0 && getenv("SLSK_DEBUG")) {
+            fprintf(stderr, "[DEBUG] net_connect fail: host=%s, port=%s, rc=%d, errno=%d\n", host, port, rc, errno);
         }
         if (rc == 0) {
             fcntl(fd, F_SETFL, flags);

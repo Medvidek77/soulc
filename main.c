@@ -15,12 +15,12 @@
 #include <inttypes.h>
 #include <poll.h>
 
-void print_usage(void) {
-    printf("soulc - minimalist soulseek client\n");
-    printf("Usage:\n");
-    printf("  soulc search <query>\n");
-    printf("  soulc get <username> <filepath> <size_in_bytes>\n");
-    exit(1);
+static void print_usage(void) {
+    fprintf(stderr, "soulc - minimalist soulseek client\n"
+                    "Usage:\n"
+                    "  soulc search <query>\n"
+                    "  soulc get <username> <filepath> <size_in_bytes>\n");
+    exit(EXIT_FAILURE);
 }
 
 static int read_string(const uint8_t *p, uint32_t len, uint32_t *off, char **out) {
@@ -94,7 +94,7 @@ static void parse_result_list(const uint8_t *payload, uint32_t len, const char *
     }
 }
 
-void parse_search_reply(const uint8_t *payload, uint32_t len) {
+static void parse_search_reply(const uint8_t *payload, uint32_t len) {
     char *user = NULL;
     uint32_t offset = 0, result_count, private_count;
 
@@ -187,7 +187,7 @@ static int search_timeout(void) {
     return (int)n;
 }
 
-void do_search(int fd, int listen_fd, const char *query) {
+static void do_search(int fd, int listen_fd, const char *query) {
     uint32_t ticket = (uint32_t)time(NULL);
     struct pollfd pfds[64];
     int pfd_count = 1;
@@ -198,9 +198,6 @@ void do_search(int fd, int listen_fd, const char *query) {
         fprintf(stderr, "Failed to send search\n");
         return;
     }
-
-    printf("Searching for '%s'. Wait ~%d seconds for results...\n", query, timeout);
-    printf("USER\tSIZE_BYTES\tFILEPATH\n");
 
     pfds[0].fd = fd;
     pfds[0].events = POLLIN;
@@ -278,7 +275,7 @@ void do_search(int fd, int listen_fd, const char *query) {
         if (pfds[i].fd >= 0) net_close(pfds[i].fd);
 }
 
-void do_get(int fd_server, const char *username, const char *filepath, uint64_t file_size) {
+static void do_get(int fd_server, const char *username, const char *filepath, uint64_t file_size) {
     if (slsk_send_get_peer_addr(fd_server, username) < 0) {
         fprintf(stderr, "Failed to send GetPeerAddress\n");
         return;
@@ -296,7 +293,7 @@ void do_get(int fd_server, const char *username, const char *filepath, uint64_t 
             uint32_t payload_len = 0;
 
             if (slsk_process_server_msg(fd_server, &msg_code, &payload, &payload_len) == 0) {
-                if (getenv("SLSK_DEBUG")) {
+                if (getenv("SLSK_DEBUG") && msg_code != 0) {
                     fprintf(stderr, "[DEBUG] Server msg: code=%u, len=%u\n", msg_code, payload_len);
                 }
                 if (msg_code == SLSK_MSG_GET_PEER_ADDR && payload != NULL && payload_len >= 4) {
@@ -328,8 +325,6 @@ void do_get(int fd_server, const char *username, const char *filepath, uint64_t 
         fprintf(stderr, "Could not find peer %s (offline or firewalled)\n", username);
         return;
     }
-
-    printf("Found peer %s at %s:%u. Connecting...\n", username, peer_ip, peer_port);
 
     char port_str[16];
     sprintf(port_str, "%u", peer_port);
@@ -402,7 +397,7 @@ void do_get(int fd_server, const char *username, const char *filepath, uint64_t 
 
     FILE *f = fopen(base_name, "wb");
     if (f) {
-        printf("Downloading to %s (%" PRIu64 " bytes)...\n", base_name, file_size);
+
         char buf[4096];
         uint64_t total_read = 0;
         while (total_read < file_size) {
@@ -419,9 +414,6 @@ void do_get(int fd_server, const char *username, const char *filepath, uint64_t 
             total_read += n;
         }
         fclose(f);
-        if (total_read == file_size) {
-            printf("Download complete.\n");
-        }
     } else {
         fprintf(stderr, "Failed to open local file for writing\n");
     }
@@ -464,37 +456,44 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Wait briefly for login reply (msg 1)
-    if (net_wait(fd, 5000) > 0) {
+    time_t login_start = time(NULL);
+    int logged_in = 0;
+    while (!logged_in && time(NULL) - login_start < 10) {
+        if (net_wait(fd, 1000) <= 0) continue;
+
         uint32_t msg_code;
         uint8_t *payload = NULL;
         uint32_t payload_len = 0;
-        if (slsk_process_server_msg(fd, &msg_code, &payload, &payload_len) == 0) {
-            if (getenv("SLSK_DEBUG")) {
-                fprintf(stderr, "[DEBUG] Server msg: code=%u, len=%u\n", msg_code, payload_len);
-            }
-            if (msg_code == SLSK_MSG_LOGIN && payload != NULL && payload_len >= 1) {
-                if (payload[0] != 1) {
-                    fprintf(stderr, "Login failed. Check credentials.\n");
-                    free(payload);
-                    net_close(fd);
-                    return 1;
-                }
-                if (getenv("SLSK_DEBUG")) {
-                    fprintf(stderr, "[DEBUG] Login successful!\n");
-                }
-                // Send listen port 0 (passive client)
-                // Oh wait, we will use our new listen port if active
-                if (listen_port > 0) {
-                    slsk_send_listen_port(fd, listen_port);
-                } else {
-                    slsk_send_listen_port(fd, 0);
-                }
-            }
-            if (payload) free(payload);
-        }
-    }
 
+        if (slsk_process_server_msg(fd, &msg_code, &payload, &payload_len) < 0) {
+            fprintf(stderr, "Connection to server lost during login.\n");
+            net_close(fd);
+            return 1;
+        }
+        if (getenv("SLSK_DEBUG") && msg_code != 0) {
+            fprintf(stderr, "[DEBUG] Server msg: code=%u, len=%u\n", msg_code, payload_len);
+        }
+        if (msg_code == SLSK_MSG_LOGIN && payload != NULL && payload_len >= 1) {
+            if (payload[0] != 1) {
+                fprintf(stderr, "Login failed. Check credentials.\n");
+                uint32_t offset = 1; // skip success boolean
+                if (payload_len >= offset + 4) {
+                    uint32_t reason_len = get_u32_le(payload + offset);
+                    offset += 4;
+                    if (payload_len >= offset + reason_len) {
+                        fprintf(stderr, "Reason: %.*s\n", reason_len, payload + offset);
+                    }
+                }
+                free(payload);
+                net_close(fd);
+                return 1;
+            }
+            logged_in = 1;
+        }
+        if (payload) free(payload);
+    }
+    if (!logged_in) { fprintf(stderr, "Login timeout.\n"); net_close(fd); return 1; }
+    slsk_send_listen_port(fd, listen_port > 0 ? listen_port : 0);
     if (strcmp(argv[1], "search") == 0 && argc == 3) {
         do_search(fd, listen_fd, argv[2]);
     } else if (strcmp(argv[1], "get") == 0 && argc == 5) {

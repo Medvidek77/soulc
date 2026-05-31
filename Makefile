@@ -17,7 +17,10 @@ $(BIN): $(OBJ)
 .c.o:
 	$(CC) $(CFLAGS) -c $< -o $@
 
+check: $(BIN)
+	./test_search.py
+
 clean:
 	rm -f $(BIN) $(OBJ)
 
-.PHONY: all clean
+.PHONY: all check clean

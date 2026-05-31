@@ -9,6 +9,12 @@
 #include <string.h>
 #include <zlib.h>
 
+static int slsk_pack_u8(uint8_t *buf, size_t buf_size, uint8_t val) {
+    if (buf_size < 1) return -1;
+    buf[0] = val;
+    return 1;
+}
+
 size_t slsk_pack_string(uint8_t *buf, size_t buf_size, const char *str) {
     size_t len = strlen(str);
     if (buf_size < 4 + len) return 0;
@@ -32,24 +38,33 @@ int slsk_send_login(int fd, const char *username, const char *password) {
     if (!n) return -1;
     offset += n;
 
-    if (sizeof(buf) - offset < 24) return -1;
+    if (sizeof(buf) - offset < 4) return -1;
 
     // version
     put_u32_le(buf + offset, 160);
     offset += 4;
 
-    // md5 hash of user + pass
+    // md5 hex hash of user + pass, as used by Nicotine+ and SoulseekQt
     MD5_CTX ctx;
     MD5_Init(&ctx);
     MD5_Update(&ctx, username, strlen(username));
     MD5_Update(&ctx, password, strlen(password));
     uint8_t digest[16];
+    char hex[33];
+    static const char hexdigits[] = "0123456789abcdef";
     MD5_Final(digest, &ctx);
+    for (int i = 0; i < 16; i++) {
+        hex[i * 2] = hexdigits[digest[i] >> 4];
+        hex[i * 2 + 1] = hexdigits[digest[i] & 15];
+    }
+    hex[32] = '\0';
 
-    memcpy(buf + offset, digest, 16);
-    offset += 16;
+    n = slsk_pack_string(buf + offset, sizeof(buf) - offset, hex);
+    if (!n) return -1;
+    offset += n;
 
-    put_u32_le(buf + offset, 0); // version patch
+    if (sizeof(buf) - offset < 4) return -1;
+    put_u32_le(buf + offset, 1); // minor version
     offset += 4;
 
     // Write header
@@ -62,7 +77,7 @@ int slsk_send_login(int fd, const char *username, const char *password) {
 int slsk_send_listen_port(int fd, uint32_t port) {
     uint8_t buf[12];
     put_u32_le(buf, 8); // len
-    put_u32_le(buf + 4, 2); // msg code 2 (SetListenPort)
+    put_u32_le(buf + 4, SLSK_MSG_SET_WAIT_PORT);
     put_u32_le(buf + 8, port);
     return net_write_exact(fd, buf, 12);
 }
@@ -143,16 +158,19 @@ int slsk_process_server_msg(int fd, uint32_t *out_msg_code, uint8_t **out_payloa
     return 0;
 }
 
-int slsk_send_peer_init(int fd, const char *my_username, const char *peer_username, uint32_t token) {
+int slsk_send_peer_init(int fd, const char *my_username, const char *type, uint32_t token) {
     uint8_t buf[512];
-    size_t offset = 8;
-
+    size_t offset = 4;
     size_t n;
+
+    if (slsk_pack_u8(buf + offset, sizeof(buf) - offset, PEER_INIT_PEER_INIT) < 0) return -1;
+    offset++;
+
     n = slsk_pack_string(buf + offset, sizeof(buf) - offset, my_username);
     if (!n) return -1;
     offset += n;
 
-    n = slsk_pack_string(buf + offset, sizeof(buf) - offset, "type"); // dummy type
+    n = slsk_pack_string(buf + offset, sizeof(buf) - offset, type);
     if (!n) return -1;
     offset += n;
 
@@ -161,9 +179,16 @@ int slsk_send_peer_init(int fd, const char *my_username, const char *peer_userna
     offset += 4;
 
     put_u32_le(buf, (uint32_t)(offset - 4));
-    put_u32_le(buf + 4, PEER_MSG_PEER_INIT);
-
     return net_write_exact(fd, buf, offset);
+}
+
+int slsk_send_pierce_fw(int fd, uint32_t token) {
+    uint8_t buf[9];
+
+    put_u32_le(buf, 5);
+    buf[4] = PEER_INIT_PIERCE_FW;
+    put_u32_le(buf + 5, token);
+    return net_write_exact(fd, buf, sizeof(buf));
 }
 
 int slsk_send_transfer_request(int fd, const char *filename, uint64_t filesize) {
@@ -197,58 +222,64 @@ int slsk_send_transfer_request(int fd, const char *filename, uint64_t filesize) 
 }
 
 void parse_peer_search_reply(const uint8_t *payload, uint32_t len, const char *peer_username) {
-    if (len < 4) return;
-    uint32_t offset = 0;
+    uint32_t offset = 0, user_len, result_count;
+    char *user = NULL;
 
-    // search_username
-    uint32_t user_len = get_u32_le(payload + offset);
+    (void)peer_username;
+    if (len < 4) return;
+    user_len = get_u32_le(payload + offset);
     offset += 4;
     if (user_len > len - offset) return;
-    // We skip the search username itself since we just want the results
+    user = malloc(user_len + 1);
+    if (!user) return;
+    memcpy(user, payload + offset, user_len);
+    user[user_len] = '\0';
     offset += user_len;
 
-    if (len - offset < 4) return;
-    uint32_t token = get_u32_le(payload + offset);
-    (void)token;
+    if (len - offset < 8) { free(user); return; }
     offset += 4;
-
-    if (len - offset < 4) return;
-    uint32_t result_count = get_u32_le(payload + offset);
+    result_count = get_u32_le(payload + offset);
     offset += 4;
 
     for (uint32_t i = 0; i < result_count; i++) {
+        uint32_t file_len, ext_len, attr_count;
+        uint32_t size_low, size_high;
+        uint64_t size;
+        char *filename;
+
         if (len - offset < 1) break;
-        uint8_t code = payload[offset++]; // usually 1
-        (void)code;
+        offset++;
 
         if (len - offset < 4) break;
-        uint32_t file_len = get_u32_le(payload + offset);
+        file_len = get_u32_le(payload + offset);
         offset += 4;
-
         if (file_len > len - offset) break;
-        char *filename = malloc(file_len + 1);
+
+        filename = malloc(file_len + 1);
+        if (!filename) break;
         memcpy(filename, payload + offset, file_len);
         filename[file_len] = '\0';
         offset += file_len;
 
-        if (len - offset < 8) { free(filename); break; }
-        uint32_t size_low = get_u32_le(payload + offset);
-        uint32_t size_high = get_u32_le(payload + offset + 4);
-        uint64_t size = ((uint64_t)size_high << 32) | size_low;
+        if (len - offset < 12) { free(filename); break; }
+        size_low = get_u32_le(payload + offset);
+        size_high = get_u32_le(payload + offset + 4);
+        size = ((uint64_t)size_high << 32) | size_low;
         offset += 8;
 
-        if (len - offset < 4) { free(filename); break; }
-        uint32_t ext_len = get_u32_le(payload + offset);
+        ext_len = get_u32_le(payload + offset);
         offset += 4;
+        if (ext_len > len - offset) { free(filename); break; }
+        offset += ext_len;
 
-        uint64_t attr_size = (uint64_t)ext_len * 8;
-        if (attr_size > len - offset) {
-            free(filename);
-            break;
-        }
-        offset += (uint32_t)attr_size;
+        if (len - offset < 4) { free(filename); break; }
+        attr_count = get_u32_le(payload + offset);
+        offset += 4;
+        if ((uint64_t)attr_count * 8 > len - offset) { free(filename); break; }
+        offset += attr_count * 8;
 
-        printf("%s\t%" PRIu64 "\t%s\n", peer_username, size, filename);
+        printf("%s\t%" PRIu64 "\t%s\n", user, size, filename);
         free(filename);
     }
+    free(user);
 }

@@ -28,6 +28,8 @@ make
 **Optional:**
 - `SLSK_SERVER` - Soulseek server address (default: `server.slsknet.org`)
 - `SLSK_PORT` - Soulseek server port (default: `2242`)
+- `SLSK_LISTEN_PORT` - local port for incoming peer search responses (active mode)
+- `SLSK_SEARCH_SECONDS` - number of seconds to collect search responses (default: `10`)
 
 ## Usage
 
@@ -41,7 +43,7 @@ export SLSK_PASS="yourpassword"
 
 soulc search "query"
 ```
-It connects to the server, issues the search, and prints results for a few seconds.
+It connects to the server, issues the search, and prints peer responses for a few seconds. Set `SLSK_LISTEN_PORT` to receive active incoming responses when your port is reachable.
 Output format (Tab-separated values):
 ```
 Username	Size	Filepath

@@ -15,8 +15,6 @@
 #include <inttypes.h>
 #include <poll.h>
 
-void parse_peer_search_reply(const uint8_t *payload, uint32_t len, const char *peer_username);
-
 void print_usage(void) {
     printf("soulc - minimalist soulseek client\n");
     printf("Usage:\n");
@@ -25,275 +23,259 @@ void print_usage(void) {
     exit(1);
 }
 
-void parse_search_reply(const uint8_t *payload, uint32_t len) {
-    if (len < 4) return;
-    uint32_t user_len = get_u32_le(payload);
-    if (user_len > len - 4) return;
+static int read_string(const uint8_t *p, uint32_t len, uint32_t *off, char **out) {
+    uint32_t n;
 
-    char *user = malloc(user_len + 1);
-    memcpy(user, payload + 4, user_len);
-    user[user_len] = '\0';
+    if (len - *off < 4) return -1;
+    n = get_u32_le(p + *off);
+    *off += 4;
+    if (n > len - *off) return -1;
+    *out = malloc(n + 1);
+    if (!*out) return -1;
+    memcpy(*out, p + *off, n);
+    (*out)[n] = '\0';
+    *off += n;
+    return 0;
+}
 
-    uint32_t offset = 4 + user_len;
+static int skip_string(const uint8_t *p, uint32_t len, uint32_t *off) {
+    uint32_t n;
 
-    if (offset + 4 > len) { free(user); return; }
-    uint32_t ticket = get_u32_le(payload + offset);
-    offset += 4;
+    if (len - *off < 4) return -1;
+    n = get_u32_le(p + *off);
+    *off += 4;
+    if (n > len - *off) return -1;
+    *off += n;
+    return 0;
+}
 
-    if (offset + 4 > len) { free(user); return; }
-    uint32_t result_count = get_u32_le(payload + offset);
-    offset += 4;
+static int inflate_msg(const uint8_t *in, uint32_t inlen, uint8_t **out, uint32_t *outlen) {
+    unsigned long cap, n;
+    uint8_t *buf;
 
-    for (uint32_t i = 0; i < result_count; i++) {
-        if (len - offset < 1) break;
-        uint8_t code = payload[offset++]; // usually 1
-
-        if (len - offset < 4) break;
-        uint32_t file_len = get_u32_le(payload + offset);
-        offset += 4;
-
-        if (file_len > len - offset) break;
-        char *filename = malloc(file_len + 1);
-        memcpy(filename, payload + offset, file_len);
-        filename[file_len] = '\0';
-        offset += file_len;
-
-        if (len - offset < 8) { free(filename); break; }
-        uint32_t size_low = get_u32_le(payload + offset);
-        uint32_t size_high = get_u32_le(payload + offset + 4);
-        uint64_t size = ((uint64_t)size_high << 32) | size_low;
-        offset += 8;
-
-        if (len - offset < 4) { free(filename); break; }
-        // ext_len is often 0 or points to attributes (like bit rate)
-        uint32_t ext_len = get_u32_le(payload + offset);
-        offset += 4;
-
-        // Skip attributes for now safely
-        uint64_t attr_size = (uint64_t)ext_len * 8;
-        if (attr_size > len - offset) {
-            free(filename);
-            break;
+    for (cap = 65536; cap <= 16 * 1024 * 1024; cap *= 2) {
+        buf = malloc(cap);
+        if (!buf) return -1;
+        n = cap;
+        if (uncompress(buf, &n, in, inlen) == Z_OK) {
+            *out = buf;
+            *outlen = (uint32_t)n;
+            return 0;
         }
-        offset += (uint32_t)attr_size; // (type(4) + val(4)) * ext_len
+        free(buf);
+    }
+    return -1;
+}
+
+static void parse_result_list(const uint8_t *payload, uint32_t len, const char *user,
+                              uint32_t *offset, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        char *filename = NULL;
+
+        if (len - *offset < 1) break;
+        (*offset)++;
+        if (read_string(payload, len, offset, &filename) < 0) break;
+        if (len - *offset < 8) { free(filename); break; }
+
+        uint32_t size_low = get_u32_le(payload + *offset);
+        uint32_t size_high = get_u32_le(payload + *offset + 4);
+        uint64_t size = ((uint64_t)size_high << 32) | size_low;
+        *offset += 8;
+
+        if (skip_string(payload, len, offset) < 0) { free(filename); break; }
+        if (len - *offset < 4) { free(filename); break; }
+        uint32_t attr_count = get_u32_le(payload + *offset);
+        *offset += 4;
+        if ((uint64_t)attr_count * 8 > len - *offset) { free(filename); break; }
+        *offset += attr_count * 8;
 
         printf("%s\t%" PRIu64 "\t%s\n", user, size, filename);
-
         free(filename);
     }
+}
 
+void parse_search_reply(const uint8_t *payload, uint32_t len) {
+    char *user = NULL;
+    uint32_t offset = 0, result_count, private_count;
+
+    if (read_string(payload, len, &offset, &user) < 0) return;
+    if (len - offset < 8) { free(user); return; }
+    offset += 4;
+    result_count = get_u32_le(payload + offset);
+    offset += 4;
+
+    parse_result_list(payload, len, user, &offset, result_count);
+
+    if (len - offset >= 13) {
+        offset += 13;
+        if (len - offset >= 4) {
+            private_count = get_u32_le(payload + offset);
+            offset += 4;
+            parse_result_list(payload, len, user, &offset, private_count);
+        }
+    }
     free(user);
 }
 
+static int handle_connect_to_peer(const uint8_t *payload, uint32_t len) {
+    uint32_t offset = 0, ip, port, token;
+    char *user = NULL, *type = NULL;
+    char host[32], sport[16];
+    int peer_fd = -1;
+
+    if (read_string(payload, len, &offset, &user) < 0) return -1;
+    if (read_string(payload, len, &offset, &type) < 0) { free(user); return -1; }
+    if (len - offset < 12) { free(user); free(type); return -1; }
+
+    ip = get_u32_le(payload + offset); offset += 4;
+    port = get_u32_le(payload + offset); offset += 4;
+    token = get_u32_le(payload + offset);
+
+    snprintf(host, sizeof(host), "%u.%u.%u.%u",
+             ip & 0xff, (ip >> 8) & 0xff, (ip >> 16) & 0xff, (ip >> 24) & 0xff);
+    snprintf(sport, sizeof(sport), "%u", port);
+
+    peer_fd = net_connect(host, sport);
+    if (peer_fd >= 0 && slsk_send_pierce_fw(peer_fd, token) < 0) {
+        net_close(peer_fd);
+        peer_fd = -1;
+    }
+
+    free(user);
+    free(type);
+    return peer_fd;
+}
+
+static void handle_peer_msg(int peer_fd) {
+    uint8_t hdr[4], *msg, *plain = NULL;
+    uint32_t msg_len, code, plain_len;
+
+    if (net_read_exact(peer_fd, hdr, 4) < 0) return;
+    msg_len = get_u32_le(hdr);
+    if (msg_len == 0 || msg_len > 16 * 1024 * 1024) return;
+
+    msg = malloc(msg_len);
+    if (!msg) return;
+    if (net_read_exact(peer_fd, msg, msg_len) < 0) { free(msg); return; }
+
+    if (msg[0] == PEER_INIT_PEER_INIT || msg[0] == PEER_INIT_PIERCE_FW) {
+        free(msg);
+        return;
+    }
+    if (msg_len < 4) { free(msg); return; }
+
+    code = get_u32_le(msg);
+    if (code == PEER_MSG_FILE_SEARCH_RESPONSE) {
+        if (inflate_msg(msg + 4, msg_len - 4, &plain, &plain_len) == 0) {
+            parse_search_reply(plain, plain_len);
+            free(plain);
+        } else {
+            parse_search_reply(msg + 4, msg_len - 4);
+        }
+    }
+    free(msg);
+}
+
+static int search_timeout(void) {
+    char *end;
+    const char *env = getenv("SLSK_SEARCH_SECONDS");
+    long n;
+
+    if (!env || !*env) return 10;
+    n = strtol(env, &end, 10);
+    if (*end != '\0' || n < 1 || n > 600) return 10;
+    return (int)n;
+}
+
 void do_search(int fd, int listen_fd, const char *query) {
-    static uint32_t passive_token = 0;
     uint32_t ticket = (uint32_t)time(NULL);
+    struct pollfd pfds[64];
+    int pfd_count = 1;
+    int timeout = search_timeout();
+    time_t start;
+
     if (slsk_send_search(fd, query, ticket) < 0) {
         fprintf(stderr, "Failed to send search\n");
         return;
     }
 
-    printf("Searching for '%s'. Wait ~10 seconds for results...\n", query);
+    printf("Searching for '%s'. Wait ~%d seconds for results...\n", query, timeout);
     printf("USER\tSIZE_BYTES\tFILEPATH\n");
 
-    struct pollfd pfds[64];
-    int pfd_count = 0;
-
-    pfds[0].fd = fd; // server
+    pfds[0].fd = fd;
     pfds[0].events = POLLIN;
-    pfd_count++;
+    pfds[0].revents = 0;
 
     if (listen_fd >= 0) {
-        pfds[1].fd = listen_fd;
-        pfds[1].events = POLLIN;
+        pfds[pfd_count].fd = listen_fd;
+        pfds[pfd_count].events = POLLIN;
+        pfds[pfd_count].revents = 0;
         pfd_count++;
     }
 
-    time_t start = time(NULL);
-    while (time(NULL) - start < 10) {
+    start = time(NULL);
+    while (time(NULL) - start < timeout) {
+        int first_peer = listen_fd >= 0 ? 2 : 1;
         int ret = poll(pfds, pfd_count, 1000);
+
         if (ret < 0) break;
         if (ret == 0) continue;
 
-        // Check server connection
         if (pfds[0].revents & POLLIN) {
-            uint32_t msg_code;
+            uint32_t msg_code, payload_len = 0;
             uint8_t *payload = NULL;
-            uint32_t payload_len = 0;
 
-            if (slsk_process_server_msg(fd, &msg_code, &payload, &payload_len) == 0) {
-                if (getenv("SLSK_DEBUG")) {
-                    fprintf(stderr, "[DEBUG] Server msg: code=%u, len=%u\n", msg_code, payload_len);
-                }
-                if (msg_code == SLSK_MSG_SEARCH_REPLY && payload != NULL && payload_len >= 4) {
-                    uint32_t decompressed_len = get_u32_le(payload);
-                    if (decompressed_len > 0 && decompressed_len < 10000000) { // Reasonable limit 10MB
-                        uint8_t *uncompressed = malloc(decompressed_len);
-                        if (uncompressed) {
-                            unsigned long destLen = decompressed_len;
-                            if (uncompress(uncompressed, &destLen, payload + 4, payload_len - 4) == Z_OK) {
-                                parse_search_reply(uncompressed, destLen);
-                            }
-                            free(uncompressed);
-                        }
-                    } else {
-                        // Fallback: try parsing as uncompressed if length makes no sense or is missing
-                        parse_search_reply(payload, payload_len);
-                    }
-                } else if (msg_code == 18 && payload != NULL && payload_len >= 8) {
-                    // ConnectToPeer
-                    uint32_t token = get_u32_le(payload);
-                    uint32_t user_len = get_u32_le(payload + 4);
-                    if (8 + user_len <= payload_len) {
-                        char *peer_user = malloc(user_len + 1);
-                        if (peer_user) {
-                            memcpy(peer_user, payload + 8, user_len);
-                            peer_user[user_len] = '\0';
-                            slsk_send_get_peer_addr(fd, peer_user);
-                            free(peer_user);
-                            passive_token = token;
-                        }
-                    }
-                } else if (msg_code == SLSK_MSG_GET_PEER_ADDR && payload != NULL && payload_len >= 4) {
-                    uint32_t user_len = get_u32_le(payload);
-                    uint32_t offset = 4 + user_len;
-                    if (offset + 8 <= payload_len) {
-                        uint32_t ip = get_u32_le(payload + offset);
-                        offset += 4;
-                        uint32_t port = get_u32_le(payload + offset);
-
-                        // Try to connect non-blocking ideally, but using net_connect here.
-                        // In worst case it hangs for TCP timeout, but simpler for now.
-                        char peer_ip[32], port_str[16];
-                        sprintf(peer_ip, "%d.%d.%d.%d", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
-                        sprintf(port_str, "%u", port);
-
-                        int peer_fd = net_connect(peer_ip, port_str);
-                        if (peer_fd >= 0) {
-                            uint8_t fw_msg[12];
-                            put_u32_le(fw_msg, 8);
-                            put_u32_le(fw_msg + 4, 18); // PierceFireWall
-                            put_u32_le(fw_msg + 8, passive_token);
-                            net_write_exact(peer_fd, fw_msg, 12);
-
-                            if (pfd_count < 64) {
-                                pfds[pfd_count].fd = peer_fd;
-                                pfds[pfd_count].events = POLLIN;
-                                pfd_count++;
-                            } else {
-                                net_close(peer_fd);
-                            }
-                        }
-                    }
-                }
-                if (payload) free(payload);
-            } else {
+            if (slsk_process_server_msg(fd, &msg_code, &payload, &payload_len) < 0) {
                 fprintf(stderr, "Connection to server lost during search.\n");
                 break;
             }
+            if (msg_code == SLSK_MSG_CONNECT_TO_PEER && payload) {
+                int peer_fd = handle_connect_to_peer(payload, payload_len);
+                if (peer_fd >= 0) {
+                    if (pfd_count < 64) {
+                        pfds[pfd_count].fd = peer_fd;
+                        pfds[pfd_count].events = POLLIN;
+                        pfds[pfd_count].revents = 0;
+                        pfd_count++;
+                    } else {
+                        net_close(peer_fd);
+                    }
+                }
+            }
+            free(payload);
         }
 
-        // Check listening socket for new P2P connections
         if (listen_fd >= 0 && (pfds[1].revents & POLLIN)) {
             int new_fd = net_accept(listen_fd);
             if (new_fd >= 0) {
                 if (pfd_count < 64) {
                     pfds[pfd_count].fd = new_fd;
                     pfds[pfd_count].events = POLLIN;
+                    pfds[pfd_count].revents = 0;
                     pfd_count++;
                 } else {
-                    net_close(new_fd); // too many peers
+                    net_close(new_fd);
                 }
             }
         }
 
-        // Check peer connections
-        for (int i = (listen_fd >= 0 ? 2 : 1); i < pfd_count; i++) {
-            if (pfds[i].revents & POLLIN) {
-                uint8_t hdr[8];
-
-                // Active peers who connect to us will FIRST send a PeerInit message (code 1).
-                // But passive connections will receive an 8-byte standard header (code 9, length).
-                // To unify and fix TCP fragmentation/desync without MSG_PEEK, we must read 4 bytes for length,
-                // and 4 bytes for code.
-
-                if (net_read_exact(pfds[i].fd, hdr, 4) < 0) {
-                    net_close(pfds[i].fd);
-                    pfds[i].fd = -1;
-                    continue;
-                }
-
-                uint32_t msg_len = get_u32_le(hdr);
-
-                // PeerInit has a length field representing the rest of the message, but the very first byte after length is a 1-byte code (0 or 1).
-                // Standard messages have a 4 byte length, then a 4 byte code.
-                // This is a protocol quirk. Usually msg_len for standard messages is >= 4.
-                // For PeerInit, the length is typically > 5, but the next 4 bytes aren't a code, they start with code 1 + username string.
-
-                // For simplicity, let's read the next 4 bytes as if it's a code or the start of PeerInit payload
-                if (net_read_exact(pfds[i].fd, hdr + 4, 4) < 0) {
-                    net_close(pfds[i].fd);
-                    pfds[i].fd = -1;
-                    continue;
-                }
-
-                if ((hdr[4] == 1 || hdr[4] == 0) && msg_len >= 4 && msg_len < 10000) { // Likely a PeerInit
-                    uint32_t remaining = msg_len - 4;
-                    if (remaining > 0) {
-                        uint8_t *discard = malloc(remaining);
-                        if (discard) {
-                            net_read_exact(pfds[i].fd, discard, remaining);
-                            free(discard);
-                        }
-                    }
-                    continue; // processed init, next read will be actual peer message
-                }
-
-                uint32_t p_msg_code = get_u32_le(hdr + 4);
-
-                if (msg_len >= 4 && msg_len < 10000000) {
-                    uint32_t p_payload_len = msg_len - 4;
-                    uint8_t *p_payload = NULL;
-                    if (p_payload_len > 0) {
-                        p_payload = malloc(p_payload_len);
-                    }
-                    if (p_payload_len == 0 || (p_payload && net_read_exact(pfds[i].fd, p_payload, p_payload_len) == 0)) {
-                        if (p_msg_code == 9 && p_payload_len >= 1) { // FileSearchResponse
-                            uint8_t is_compressed = p_payload[0];
-                            uint8_t *p_uncompressed = malloc(1000000); // 1MB buffer
-                            if (p_uncompressed) {
-                                unsigned long p_destLen = 1000000;
-                                int res = Z_BUF_ERROR;
-                                if (p_payload_len > (uint32_t)(is_compressed ? 1 : 0)) {
-                                    res = uncompress(p_uncompressed, &p_destLen, (is_compressed ? p_payload + 1 : p_payload), p_payload_len - (is_compressed ? 1 : 0));
-                                }
-                                if (res == Z_OK) {
-                                    parse_peer_search_reply(p_uncompressed, p_destLen, "peer");
-                                } else {
-                                    parse_peer_search_reply(p_payload, p_payload_len, "peer");
-                                }
-                                free(p_uncompressed);
-                            }
-                        }
-                    }
-                    if (p_payload) free(p_payload);
-                }
+        for (int i = first_peer; i < pfd_count; i++) {
+            if (pfds[i].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+                net_close(pfds[i].fd);
+                pfds[i].fd = -1;
+            } else if (pfds[i].revents & POLLIN) {
+                handle_peer_msg(pfds[i].fd);
             }
         }
 
-        // Compact fd list
-        int k = (listen_fd >= 0 ? 2 : 1);
-        for (int i = k; i < pfd_count; i++) {
-            if (pfds[i].fd != -1) {
-                pfds[k++] = pfds[i];
-            }
-        }
+        int k = first_peer;
+        for (int i = first_peer; i < pfd_count; i++)
+            if (pfds[i].fd != -1) pfds[k++] = pfds[i];
         pfd_count = k;
     }
 
-    for (int i = (listen_fd >= 0 ? 2 : 1); i < pfd_count; i++) {
+    for (int i = (listen_fd >= 0 ? 2 : 1); i < pfd_count; i++)
         if (pfds[i].fd >= 0) net_close(pfds[i].fd);
-    }
 }
 
 void do_get(int fd_server, const char *username, const char *filepath, uint64_t file_size) {
@@ -359,7 +341,7 @@ void do_get(int fd_server, const char *username, const char *filepath, uint64_t 
 
     // Simplistic P2P download phase (not fully robust for real network but follows standard)
     const char *my_username = getenv("SLSK_USER");
-    slsk_send_peer_init(fd_peer, my_username, username, 0);
+    slsk_send_peer_init(fd_peer, my_username, "P", 0);
     slsk_send_transfer_request(fd_peer, filepath, file_size);
 
     // Wait for TransferReply message (or other peer messages)

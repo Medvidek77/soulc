@@ -5,15 +5,17 @@
 #include <stddef.h>
 
 #define SLSK_MSG_LOGIN 1
+#define SLSK_MSG_SET_WAIT_PORT 2
+#define SLSK_MSG_GET_PEER_ADDR 3
+#define SLSK_MSG_CONNECT_TO_PEER 18
 #define SLSK_MSG_SEARCH 26
-#define SLSK_MSG_SEARCH_REPLY 9
-#define SLSK_MSG_GET_PEER_ADDR 71
 
-#define PEER_MSG_PIERCE_FW 18
-#define PEER_MSG_PEER_INIT 1
+#define PEER_INIT_PIERCE_FW 0
+#define PEER_INIT_PEER_INIT 1
+
+#define PEER_MSG_FILE_SEARCH_RESPONSE 9
 #define PEER_MSG_TRANSFER_REQ 40
 #define PEER_MSG_TRANSFER_REP 41
-
 typedef struct {
     char *username;
     char *filename;
@@ -43,7 +45,10 @@ int slsk_send_get_peer_addr(int fd, const char *username);
 int slsk_process_server_msg(int fd, uint32_t *out_msg_code, uint8_t **out_payload, uint32_t *out_len);
 
 /* Send PeerInit to a peer */
-int slsk_send_peer_init(int fd, const char *my_username, const char *peer_username, uint32_t token);
+int slsk_send_peer_init(int fd, const char *my_username, const char *type, uint32_t token);
+
+/* Send PierceFireWall to a peer */
+int slsk_send_pierce_fw(int fd, uint32_t token);
 
 /* Send TransferRequest to a peer */
 int slsk_send_transfer_request(int fd, const char *filename, uint64_t filesize);

@@ -36,10 +36,12 @@ int net_connect(const char *host, const char *port) {
             struct pollfd pfd;
             pfd.fd = fd;
             pfd.events = POLLOUT;
-            if (poll(&pfd, 1, 1500) > 0) {
+            int pret = poll(&pfd, 1, 1500);
+            if (pret > 0 && (pfd.revents & POLLOUT)) {
                 int error = 0;
                 socklen_t errlen = sizeof(error);
                 if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &errlen) == 0 && error == 0) rc = 0;
+                else if (error != 0) errno = error; // Update errno with actual socket error
             }
         }
         if (rc < 0 && getenv("SLSK_DEBUG")) {

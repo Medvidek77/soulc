@@ -15,6 +15,8 @@
 #include <inttypes.h>
 #include <poll.h>
 
+void parse_peer_search_reply(const uint8_t *payload, uint32_t len, const char *peer_username);
+
 void print_usage(void) {
     printf("soulc - minimalist soulseek client\n");
     printf("Usage:\n");
@@ -144,6 +146,97 @@ void do_search(int fd, int listen_fd, const char *query) {
                 break;
             }
         }
+
+        // Check listening socket for new P2P connections
+        if (listen_fd >= 0 && (pfds[1].revents & POLLIN)) {
+            int new_fd = net_accept(listen_fd);
+            if (new_fd >= 0) {
+                if (pfd_count < 64) {
+                    pfds[pfd_count].fd = new_fd;
+                    pfds[pfd_count].events = POLLIN;
+                    pfd_count++;
+                } else {
+                    net_close(new_fd); // too many peers
+                }
+            }
+        }
+
+        // Check peer connections
+        for (int i = (listen_fd >= 0 ? 2 : 1); i < pfd_count; i++) {
+            if (pfds[i].revents & POLLIN) {
+                uint8_t hdr[8];
+                int r = recv(pfds[i].fd, hdr, 5, MSG_PEEK); // peek first for PeerInit (5 bytes)
+                if (r <= 0) {
+                    net_close(pfds[i].fd);
+                    pfds[i].fd = -1; // mark closed
+                    continue;
+                }
+
+                // Active peers who connect to us will FIRST send a PeerInit message (code 1)
+                // PeerInit header is 4 bytes len + 1 byte code = 5 bytes
+                if (hdr[4] == 1 || hdr[4] == 0) {
+                    if (net_read_exact(pfds[i].fd, hdr, 5) < 0) {
+                        net_close(pfds[i].fd);
+                        pfds[i].fd = -1;
+                        continue;
+                    }
+                    uint32_t init_len = get_u32_le(hdr);
+                    if (init_len > 1 && init_len < 1000) {
+                        uint8_t *init_payload = malloc(init_len - 1);
+                        if (init_payload) {
+                            net_read_exact(pfds[i].fd, init_payload, init_len - 1);
+                            free(init_payload);
+                        }
+                    }
+                    continue; // processed init, next read will be actual peer message
+                }
+
+                // Read exact P2P header
+                if (net_read_exact(pfds[i].fd, hdr, 8) < 0) {
+                    net_close(pfds[i].fd);
+                    pfds[i].fd = -1;
+                    continue;
+                }
+
+                uint32_t p_msg_len = get_u32_le(hdr);
+                uint32_t p_msg_code = get_u32_le(hdr + 4);
+
+                if (p_msg_len >= 4 && p_msg_len < 10000000) {
+                    uint32_t p_payload_len = p_msg_len - 4;
+                    uint8_t *p_payload = malloc(p_payload_len);
+                    if (p_payload && net_read_exact(pfds[i].fd, p_payload, p_payload_len) == 0) {
+                        if (p_msg_code == 9) { // FileSearchResponse
+                            uint8_t is_compressed = p_payload[0];
+                            uint8_t *p_uncompressed = malloc(1000000); // 1MB buffer
+                            if (p_uncompressed) {
+                                unsigned long p_destLen = 1000000;
+                                int res = uncompress(p_uncompressed, &p_destLen, (is_compressed ? p_payload + 1 : p_payload), p_payload_len - (is_compressed ? 1 : 0));
+                                if (res == Z_OK) {
+                                    parse_peer_search_reply(p_uncompressed, p_destLen, "active_peer");
+                                } else {
+                                    parse_peer_search_reply(p_payload, p_payload_len, "active_peer");
+                                }
+                                free(p_uncompressed);
+                            }
+                        }
+                    }
+                    if (p_payload) free(p_payload);
+                }
+            }
+        }
+
+        // Compact fd list
+        int k = (listen_fd >= 0 ? 2 : 1);
+        for (int i = k; i < pfd_count; i++) {
+            if (pfds[i].fd != -1) {
+                pfds[k++] = pfds[i];
+            }
+        }
+        pfd_count = k;
+    }
+
+    for (int i = (listen_fd >= 0 ? 2 : 1); i < pfd_count; i++) {
+        if (pfds[i].fd >= 0) net_close(pfds[i].fd);
     }
 }
 

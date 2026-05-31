@@ -5,6 +5,7 @@
 #include "md5.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include <string.h>
 #include <zlib.h>
 
@@ -193,4 +194,61 @@ int slsk_send_transfer_request(int fd, const char *filename, uint64_t filesize) 
     put_u32_le(buf + 4, PEER_MSG_TRANSFER_REQ);
 
     return net_write_exact(fd, buf, offset);
+}
+
+void parse_peer_search_reply(const uint8_t *payload, uint32_t len, const char *peer_username) {
+    if (len < 4) return;
+    uint32_t offset = 0;
+
+    // search_username
+    uint32_t user_len = get_u32_le(payload + offset);
+    offset += 4;
+    if (user_len > len - offset) return;
+    // We skip the search username itself since we just want the results
+    offset += user_len;
+
+    if (len - offset < 4) return;
+    uint32_t token = get_u32_le(payload + offset);
+    (void)token;
+    offset += 4;
+
+    if (len - offset < 4) return;
+    uint32_t result_count = get_u32_le(payload + offset);
+    offset += 4;
+
+    for (uint32_t i = 0; i < result_count; i++) {
+        if (len - offset < 1) break;
+        uint8_t code = payload[offset++]; // usually 1
+        (void)code;
+
+        if (len - offset < 4) break;
+        uint32_t file_len = get_u32_le(payload + offset);
+        offset += 4;
+
+        if (file_len > len - offset) break;
+        char *filename = malloc(file_len + 1);
+        memcpy(filename, payload + offset, file_len);
+        filename[file_len] = '\0';
+        offset += file_len;
+
+        if (len - offset < 8) { free(filename); break; }
+        uint32_t size_low = get_u32_le(payload + offset);
+        uint32_t size_high = get_u32_le(payload + offset + 4);
+        uint64_t size = ((uint64_t)size_high << 32) | size_low;
+        offset += 8;
+
+        if (len - offset < 4) { free(filename); break; }
+        uint32_t ext_len = get_u32_le(payload + offset);
+        offset += 4;
+
+        uint64_t attr_size = (uint64_t)ext_len * 8;
+        if (attr_size > len - offset) {
+            free(filename);
+            break;
+        }
+        offset += (uint32_t)attr_size;
+
+        printf("%s\t%" PRIu64 "\t%s\n", peer_username, size, filename);
+        free(filename);
+    }
 }

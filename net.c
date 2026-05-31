@@ -2,6 +2,7 @@
 #include <sys/time.h>
 #include "net.h"
 #include <stdio.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -27,18 +28,24 @@ int net_connect(const char *host, const char *port) {
         fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (fd < 0) continue;
 
-        // Use a short 2-second timeout for connect instead of blocking forever
-        struct timeval tv;
-        tv.tv_sec = 2;
-        tv.tv_usec = 0;
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
-        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
-            tv.tv_sec = 0; // reset
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
-            break; // Success
+        int rc = connect(fd, p->ai_addr, p->ai_addrlen);
+        if (rc < 0 && errno == EINPROGRESS) {
+            struct pollfd pfd;
+            pfd.fd = fd;
+            pfd.events = POLLOUT;
+            if (poll(&pfd, 1, 1000) > 0) {
+                int error = 0;
+                socklen_t errlen = sizeof(error);
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &errlen) == 0 && error == 0) rc = 0;
+            }
         }
-
+        if (rc == 0) {
+            fcntl(fd, F_SETFL, flags);
+            break;
+        }
         close(fd);
         fd = -1;
     }

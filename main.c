@@ -256,6 +256,9 @@ static void do_search(int fd, int listen_fd, const char *query) {
                 int peer_fd = handle_connect_to_peer(payload, payload_len);
                 if (peer_fd >= 0) {
                     if (pfd_count < 64) {
+                        if (getenv("SLSK_DEBUG")) {
+                            fprintf(stderr, "[DEBUG] Accepted ConnectToPeer request (fd: %d), total active poll fds: %d\n", peer_fd, pfd_count + 1);
+                        }
                         pfds[pfd_count].fd = peer_fd;
                         pfds[pfd_count].events = POLLIN;
                         pfds[pfd_count].revents = 0;

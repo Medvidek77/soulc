@@ -168,10 +168,10 @@ void MD5_Final(uint8_t digest[16], MD5_CTX *context) {
     MD5_Update(context, PADDING, padLen);
     MD5_Update(context, bits, 8);
 
-    for (int i = 0, j = 0; j < 4; i+=4, j++) {
-        digest[i] = (uint8_t)(context->state[j] & 0xff);
-        digest[i+1] = (uint8_t)((context->state[j] >> 8) & 0xff);
-        digest[i+2] = (uint8_t)((context->state[j] >> 16) & 0xff);
-        digest[i+3] = (uint8_t)((context->state[j] >> 24) & 0xff);
+    for (int i = 0; i < 4; i++) {
+        digest[i*4] = (uint8_t)(context->state[i] & 0xff);
+        digest[i*4+1] = (uint8_t)((context->state[i] >> 8) & 0xff);
+        digest[i*4+2] = (uint8_t)((context->state[i] >> 16) & 0xff);
+        digest[i*4+3] = (uint8_t)((context->state[i] >> 24) & 0xff);
     }
 }

@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200112L
+#include <sys/time.h>
 #include "net.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +27,15 @@ int net_connect(const char *host, const char *port) {
         fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (fd < 0) continue;
 
+        // Use a short 2-second timeout for connect instead of blocking forever
+        struct timeval tv;
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
+
         if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
+            tv.tv_sec = 0; // reset
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
             break; // Success
         }
 

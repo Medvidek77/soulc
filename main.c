@@ -86,6 +86,7 @@ void parse_search_reply(const uint8_t *payload, uint32_t len) {
 }
 
 void do_search(int fd, int listen_fd, const char *query) {
+    static uint32_t passive_token = 0;
     uint32_t ticket = (uint32_t)time(NULL);
     if (slsk_send_search(fd, query, ticket) < 0) {
         fprintf(stderr, "Failed to send search\n");
@@ -139,6 +140,51 @@ void do_search(int fd, int listen_fd, const char *query) {
                         // Fallback: try parsing as uncompressed if length makes no sense or is missing
                         parse_search_reply(payload, payload_len);
                     }
+                } else if (msg_code == 18 && payload != NULL && payload_len >= 8) {
+                    // ConnectToPeer
+                    uint32_t token = get_u32_le(payload);
+                    uint32_t user_len = get_u32_le(payload + 4);
+                    if (8 + user_len <= payload_len) {
+                        char *peer_user = malloc(user_len + 1);
+                        if (peer_user) {
+                            memcpy(peer_user, payload + 8, user_len);
+                            peer_user[user_len] = '\0';
+                            slsk_send_get_peer_addr(fd, peer_user);
+                            free(peer_user);
+                            passive_token = token;
+                        }
+                    }
+                } else if (msg_code == SLSK_MSG_GET_PEER_ADDR && payload != NULL && payload_len >= 4) {
+                    uint32_t user_len = get_u32_le(payload);
+                    uint32_t offset = 4 + user_len;
+                    if (offset + 8 <= payload_len) {
+                        uint32_t ip = get_u32_le(payload + offset);
+                        offset += 4;
+                        uint32_t port = get_u32_le(payload + offset);
+
+                        // Try to connect non-blocking ideally, but using net_connect here.
+                        // In worst case it hangs for TCP timeout, but simpler for now.
+                        char peer_ip[32], port_str[16];
+                        sprintf(peer_ip, "%d.%d.%d.%d", ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+                        sprintf(port_str, "%u", port);
+
+                        int peer_fd = net_connect(peer_ip, port_str);
+                        if (peer_fd >= 0) {
+                            uint8_t fw_msg[12];
+                            put_u32_le(fw_msg, 8);
+                            put_u32_le(fw_msg + 4, 18); // PierceFireWall
+                            put_u32_le(fw_msg + 8, passive_token);
+                            net_write_exact(peer_fd, fw_msg, 12);
+
+                            if (pfd_count < 64) {
+                                pfds[pfd_count].fd = peer_fd;
+                                pfds[pfd_count].events = POLLIN;
+                                pfd_count++;
+                            } else {
+                                net_close(peer_fd);
+                            }
+                        }
+                    }
                 }
                 if (payload) free(payload);
             } else {
@@ -165,56 +211,66 @@ void do_search(int fd, int listen_fd, const char *query) {
         for (int i = (listen_fd >= 0 ? 2 : 1); i < pfd_count; i++) {
             if (pfds[i].revents & POLLIN) {
                 uint8_t hdr[8];
-                int r = recv(pfds[i].fd, hdr, 5, MSG_PEEK); // peek first for PeerInit (5 bytes)
-                if (r <= 0) {
-                    net_close(pfds[i].fd);
-                    pfds[i].fd = -1; // mark closed
-                    continue;
-                }
 
-                // Active peers who connect to us will FIRST send a PeerInit message (code 1)
-                // PeerInit header is 4 bytes len + 1 byte code = 5 bytes
-                if (hdr[4] == 1 || hdr[4] == 0) {
-                    if (net_read_exact(pfds[i].fd, hdr, 5) < 0) {
-                        net_close(pfds[i].fd);
-                        pfds[i].fd = -1;
-                        continue;
-                    }
-                    uint32_t init_len = get_u32_le(hdr);
-                    if (init_len > 1 && init_len < 1000) {
-                        uint8_t *init_payload = malloc(init_len - 1);
-                        if (init_payload) {
-                            net_read_exact(pfds[i].fd, init_payload, init_len - 1);
-                            free(init_payload);
-                        }
-                    }
-                    continue; // processed init, next read will be actual peer message
-                }
+                // Active peers who connect to us will FIRST send a PeerInit message (code 1).
+                // But passive connections will receive an 8-byte standard header (code 9, length).
+                // To unify and fix TCP fragmentation/desync without MSG_PEEK, we must read 4 bytes for length,
+                // and 4 bytes for code.
 
-                // Read exact P2P header
-                if (net_read_exact(pfds[i].fd, hdr, 8) < 0) {
+                if (net_read_exact(pfds[i].fd, hdr, 4) < 0) {
                     net_close(pfds[i].fd);
                     pfds[i].fd = -1;
                     continue;
                 }
 
-                uint32_t p_msg_len = get_u32_le(hdr);
+                uint32_t msg_len = get_u32_le(hdr);
+
+                // PeerInit has a length field representing the rest of the message, but the very first byte after length is a 1-byte code (0 or 1).
+                // Standard messages have a 4 byte length, then a 4 byte code.
+                // This is a protocol quirk. Usually msg_len for standard messages is >= 4.
+                // For PeerInit, the length is typically > 5, but the next 4 bytes aren't a code, they start with code 1 + username string.
+
+                // For simplicity, let's read the next 4 bytes as if it's a code or the start of PeerInit payload
+                if (net_read_exact(pfds[i].fd, hdr + 4, 4) < 0) {
+                    net_close(pfds[i].fd);
+                    pfds[i].fd = -1;
+                    continue;
+                }
+
+                if ((hdr[4] == 1 || hdr[4] == 0) && msg_len >= 4 && msg_len < 10000) { // Likely a PeerInit
+                    uint32_t remaining = msg_len - 4;
+                    if (remaining > 0) {
+                        uint8_t *discard = malloc(remaining);
+                        if (discard) {
+                            net_read_exact(pfds[i].fd, discard, remaining);
+                            free(discard);
+                        }
+                    }
+                    continue; // processed init, next read will be actual peer message
+                }
+
                 uint32_t p_msg_code = get_u32_le(hdr + 4);
 
-                if (p_msg_len >= 4 && p_msg_len < 10000000) {
-                    uint32_t p_payload_len = p_msg_len - 4;
-                    uint8_t *p_payload = malloc(p_payload_len);
-                    if (p_payload && net_read_exact(pfds[i].fd, p_payload, p_payload_len) == 0) {
-                        if (p_msg_code == 9) { // FileSearchResponse
+                if (msg_len >= 4 && msg_len < 10000000) {
+                    uint32_t p_payload_len = msg_len - 4;
+                    uint8_t *p_payload = NULL;
+                    if (p_payload_len > 0) {
+                        p_payload = malloc(p_payload_len);
+                    }
+                    if (p_payload_len == 0 || (p_payload && net_read_exact(pfds[i].fd, p_payload, p_payload_len) == 0)) {
+                        if (p_msg_code == 9 && p_payload_len >= 1) { // FileSearchResponse
                             uint8_t is_compressed = p_payload[0];
                             uint8_t *p_uncompressed = malloc(1000000); // 1MB buffer
                             if (p_uncompressed) {
                                 unsigned long p_destLen = 1000000;
-                                int res = uncompress(p_uncompressed, &p_destLen, (is_compressed ? p_payload + 1 : p_payload), p_payload_len - (is_compressed ? 1 : 0));
+                                int res = Z_BUF_ERROR;
+                                if (p_payload_len > (uint32_t)(is_compressed ? 1 : 0)) {
+                                    res = uncompress(p_uncompressed, &p_destLen, (is_compressed ? p_payload + 1 : p_payload), p_payload_len - (is_compressed ? 1 : 0));
+                                }
                                 if (res == Z_OK) {
-                                    parse_peer_search_reply(p_uncompressed, p_destLen, "active_peer");
+                                    parse_peer_search_reply(p_uncompressed, p_destLen, "peer");
                                 } else {
-                                    parse_peer_search_reply(p_payload, p_payload_len, "active_peer");
+                                    parse_peer_search_reply(p_payload, p_payload_len, "peer");
                                 }
                                 free(p_uncompressed);
                             }
@@ -272,7 +328,7 @@ void do_get(int fd_server, const char *username, const char *filepath, uint64_t 
                         if (offset + 4 <= payload_len) {
                             peer_port = get_u32_le(payload + offset);
                             sprintf(peer_ip, "%d.%d.%d.%d",
-                                    (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+                                    ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
                             found = 1;
                         }
                     }

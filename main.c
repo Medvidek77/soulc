@@ -138,7 +138,7 @@ static int handle_connect_to_peer(const uint8_t *payload, uint32_t len) {
     token = get_u32_le(payload + offset);
 
     snprintf(host, sizeof(host), "%u.%u.%u.%u",
-             ip & 0xff, (ip >> 8) & 0xff, (ip >> 16) & 0xff, (ip >> 24) & 0xff);
+             (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff);
     snprintf(sport, sizeof(sport), "%u", port);
 
     peer_fd = net_connect(host, sport);
@@ -339,7 +339,7 @@ static void do_get(int fd_server, const char *username, const char *filepath, ui
                         if (offset + 4 <= payload_len) {
                             peer_port = get_u32_le(payload + offset);
                             sprintf(peer_ip, "%d.%d.%d.%d",
-                                    ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+                                    (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff);
                             found = 1;
                         }
                     }

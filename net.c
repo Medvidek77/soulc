@@ -40,8 +40,8 @@ int net_connect(const char *host, const char *port) {
             if (pret > 0 && (pfd.revents & POLLOUT)) {
                 int error = 0;
                 socklen_t errlen = sizeof(error);
-                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &errlen) == 0 && error == 0) rc = 0;
-                else if (error != 0) errno = error; // Update errno with actual socket error
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &errlen) == 0 && error == 0) { rc = 0; }
+                else if (error != 0) { errno = error; rc = -1; }
             }
         }
         if (rc < 0 && getenv("SLSK_DEBUG")) {
